@@ -2,7 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type ReviewAuthor struct {
@@ -45,4 +49,70 @@ func (s *Store) ListReviews(ctx context.Context, movieID int64) ([]Review, error
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+var (
+	ErrDuplicate = errors.New("review already exists")
+	ErrNoMovie   = errors.New("movie not found")
+)
+
+func (s *Store) AddReview(
+	ctx context.Context,
+	memberID, movieID int64,
+	text string,
+) (Review, error) {
+	var r Review
+
+	err := s.Pool.QueryRow(ctx,
+		`INSERT INTO reviews (member_id, movie_id, text)
+		 SELECT $1, m.id, $3
+		 FROM movies m
+		 WHERE m.id = $2
+		 RETURNING id, member_id, movie_id, text, created_at, updated_at`,
+		memberID, movieID, text,
+	).Scan(
+		&r.ID,
+		&r.MemberID,
+		&r.MovieID,
+		&r.Text,
+		&r.CreatedAt,
+		&r.UpdatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Review{}, ErrNoMovie
+		}
+
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Review{}, ErrDuplicate
+		}
+
+		return Review{}, err
+	}
+
+	return r, nil
+}
+
+
+func (s *Store) DeleteReview(
+	ctx context.Context,
+	reviewID, memberID int64,
+	isAdmin bool,
+) error {
+	tag, err := s.Pool.Exec(ctx,
+		`DELETE FROM reviews
+		 WHERE id = $1 AND (member_id = $2 OR $3)`,
+		reviewID, memberID, isAdmin,
+	)
+	if err != nil {
+		return err
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	return nil
 }
